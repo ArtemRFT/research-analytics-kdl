@@ -3,6 +3,11 @@ import unicodedata
 import pandas as pd
 import streamlit as st
 
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+
 st.set_page_config(page_title="Аналитика направлений", page_icon="📊", layout="wide")
 st.title("📊 Аналитика по исследованиям")
 st.caption("Загрузите Excel-файл — данные обрабатываются только в памяти и не сохраняются.")
@@ -211,45 +216,79 @@ s3.metric("Выполнение", f"{status_pct:.1f}%")\
 # ============================================================
 # 4. Экспорт в Excel
 # ============================================================
+# ---------- Экспорт в Excel с гиперссылками ----------
 st.divider()
-st.header("⬇️ Скачать данные")
+st.header("⬇️ Скачать данные (с переходами)")
 
-# Лист 1: исследование × отделение
+# Подготовка данных (как у тебя было)
 export_detail = (
     long_df.groupby(["Исследование", "Отделение"], dropna=False)
     .size()
     .reset_index(name="Заказано раз")
-    .sort_values(["Исследование", "Заказано раз"], ascending=[True, False])
-    .reset_index(drop=True)
 )
 
-# Лист 2: сводка по исследованиям
-export_summary = (
-    long_df.groupby("Исследование", dropna=False)
-    .agg(
-        Всего_заказов=("Направление", "size"),
-        Отделений=("Отделение", "nunique"),
-    )
-    .reset_index()
-    .sort_values("Всего_заказов", ascending=False)
-    .reset_index(drop=True)
-)
-
-# Собираем xlsx в память (без записи на диск)
-from io import BytesIO
-
+# Создаём Excel вручную через openpyxl, чтобы вставить гиперссылки
 buffer = BytesIO()
-with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-    export_detail.to_excel(writer, sheet_name="По исследованиям", index=False)
-    export_summary.to_excel(writer, sheet_name="Сводка", index=False)
+wb = Workbook()
+
+# --- Лист 1: Сводка с гиперссылками ---
+ws_summary = wb.active
+ws_summary.title = "Сводка"
+
+# Заголовки
+ws_summary.append(["Исследование", "Отделение", "Заказано раз"])
+
+# Для каждой строки создаём гиперссылку на детализацию
+# (В идеале — на отдельный лист, но для простоты сделаем один общий лист деталей)
+# Сначала создадим лист детализации
+ws_detail = wb.create_sheet("Детализация")
+ws_detail.append(["Исследование", "Отделение", "Направление"])
+
+# Заполняем детализацию (каждый заказ = строка)
+detail_rows = []
+for _, r in long_df.iterrows():
+    detail_rows.append((r["Исследование"], r["Отделение"], r["Направление"]))
+    ws_detail.append([r["Исследование"], r["Отделение"], r["Направление"]])
+
+# Теперь заполняем сводку с гиперссылками
+# Нам нужно знать, с какой строки начинается детализация для каждой пары
+# (Исследование, Отделение). Сделаем простой поиск.
+# Для больших данных это может быть медленно, но для отчёта сойдёт.
+from collections import defaultdict
+start_row = defaultdict(int)  # (research, dept) -> row index в ws_detail
+current_row = 2  # т.к. строка 1 — заголовок
+for res, dept, _ in detail_rows:
+    key = (res, dept)
+    if key not in start_row:
+        start_row[key] = current_row
+    current_row += 1
+
+# Записываем сводку
+for idx, row in export_detail.iterrows():
+    research = row["Исследование"]
+    dept = row["Отделение"]
+    count = int(row["Заказано раз"])
+    ws_summary.append([research, dept, count])
+    # Добавляем гиперссылку в ячейку с числом
+    cell = ws_summary.cell(row=idx + 2, column=3)  # +2 из-за заголовка
+    target_row = start_row.get((research, dept), 1)
+    # Ссылка на лист "Детализация", ячейку A{target_row}
+    cell.hyperlink = f"#Детализация!A{target_row}"
+    cell.font = Font(color="0563C1", underline="single")
+    cell.value = count  # значение остаётся числом, но выглядит как ссылка
+
+# Автоширина (опционально)
+for ws in [ws_summary, ws_detail]:
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 2, 50)
+
+wb.save(buffer)
 buffer.seek(0)
 
 st.download_button(
-    label="📥 Скачать Excel (исследования × отделения)",
+    label="📥 Скачать Excel (с переходами по клику)",
     data=buffer.getvalue(),
-    file_name="research_by_department.xlsx",
+    file_name="research_with_links.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
-st.progress(min(status_pct / 100, 1.0))
-st.caption(f"Выполнено {status_done} из {status_ordered} позиций по столбцу «Статус».")

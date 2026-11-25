@@ -14,6 +14,7 @@ STATUS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
 def parse_status(s):
+    """Возвращает (заказано_по_статусу, выполнено). Если не распарсили — (None, None)."""
     if not isinstance(s, str):
         return None, None
     m = STATUS_RE.search(s)
@@ -78,11 +79,14 @@ def load_and_prepare(file_bytes: bytes):
         )
 
     df = df[need].copy()
-    df = df[df["Направление"].notna()]
+    df = df[df["Направление"].notna()].reset_index(drop=True)
 
+    # --- парсим статус отдельно (для таблицы в конце) ---
     parsed = df["Статус"].apply(parse_status)
-    df["Заказано"] = [p[0] for p in parsed]
+    df["Статус_Заказано"] = [p[0] for p in parsed]
+    df["Статус_Выполнено"] = [p[1] for p in parsed]
 
+    # --- разворачиваем исследования: 1 строка = 1 заказ исследования ---
     rows = []
     for _, r in df.iterrows():
         for res in split_research(r["Исследования"]):
@@ -90,9 +94,10 @@ def load_and_prepare(file_bytes: bytes):
                 "Направление": r["Направление"],
                 "Отделение": r["Отделение"],
                 "Исследование": res,
-                "Заказано": r["Заказано"],
             })
-    return pd.DataFrame(rows)
+    long_df = pd.DataFrame(rows)
+
+    return df, long_df
 
 
 # ------------------------------------------------------------------
@@ -105,7 +110,7 @@ if uploaded is None:
     st.stop()
 
 try:
-    long_df = load_and_prepare(uploaded.getvalue())
+    raw_df, long_df = load_and_prepare(uploaded.getvalue())
 except Exception as e:
     st.error(f"Ошибка чтения файла: {e}")
     st.exception(e)
@@ -115,28 +120,43 @@ if long_df.empty:
     st.warning("Не удалось извлечь ни одного исследования.")
     st.stop()
 
-# ---------- Раскрывающиеся таблицы ----------
-# Сводка: исследование -> сколько всего заказано
+# ---------- Раскрывающиеся таблицы по исследованиям ----------
 summary = (
-    long_df.groupby("Исследование", dropna=False)["Заказано"]
-    .sum()
-    .reset_index()
+    long_df.groupby("Исследование", dropna=False)
+    .size()  # ← просто количество заказов (строк)
+    .reset_index(name="Заказано")
     .sort_values("Заказано", ascending=False)
 )
 
-st.subheader("Исследования (нажмите на название, чтобы раскрыть отделения)")
+st.subheader("Исследования (нажмите, чтобы раскрыть отделения)")
 
 for _, row in summary.iterrows():
     research = row["Исследование"]
-    total = int(row["Заказано"]) if pd.notna(row["Заказано"]) else 0
+    total = int(row["Заказано"])
 
     with st.expander(f"{research} — заказано: {total}"):
         dept_stats = (
             long_df[long_df["Исследование"] == research]
-            .groupby("Отделение", dropna=False)["Заказано"]
-            .sum()
-            .reset_index()
-            .rename(columns={"Отделение": "Отделение", "Заказано": "Заказано раз"})
+            .groupby("Отделение", dropna=False)
+            .size()
+            .reset_index(name="Заказано раз")
             .sort_values("Заказано раз", ascending=False)
         )
         st.dataframe(dept_stats, use_container_width=True, hide_index=True)
+
+# ---------- Статусы (в самом конце) ----------
+st.header("📋 Статусы по направлениям")
+
+status_summary = pd.DataFrame({
+    "Показатель": ["Заказано (из статуса)", "Выполнено (из статуса)"],
+    "Значение": [
+        int(raw_df["Статус_Заказано"].fillna(0).sum()),
+        int(raw_df["Статус_Выполнено"].fillna(0).sum()),
+    ],
+})
+status_summary["%"] = (
+    status_summary["Значение"] / status_summary["Значение"].iloc[0] * 100
+).round(1)
+status_summary.loc[0, "%"] = 100.0
+
+st.dataframe(status_summary, use_container_width=True, hide_index=True)

@@ -205,7 +205,51 @@ status_pct = (status_done / status_ordered * 100) if status_ordered else 0
 s1, s2, s3 = st.columns(3)
 s1.metric("Заказано (из статуса)", status_ordered)
 s2.metric("Выполнено (из статуса)", status_done)
-s3.metric("Выполнение", f"{status_pct:.1f}%")
+s3.metric("Выполнение", f"{status_pct:.1f}%")\
+
+
+# ============================================================
+# 4. Экспорт в Excel
+# ============================================================
+st.divider()
+st.header("⬇️ Скачать данные")
+
+# Лист 1: исследование × отделение
+export_detail = (
+    long_df.groupby(["Исследование", "Отделение"], dropna=False)
+    .size()
+    .reset_index(name="Заказано раз")
+    .sort_values(["Исследование", "Заказано раз"], ascending=[True, False])
+    .reset_index(drop=True)
+)
+
+# Лист 2: сводка по исследованиям
+export_summary = (
+    long_df.groupby("Исследование", dropna=False)
+    .agg(
+        Всего_заказов=("Направление", "size"),
+        Отделений=("Отделение", "nunique"),
+    )
+    .reset_index()
+    .sort_values("Всего_заказов", ascending=False)
+    .reset_index(drop=True)
+)
+
+# Собираем xlsx в память (без записи на диск)
+from io import BytesIO
+
+buffer = BytesIO()
+with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+    export_detail.to_excel(writer, sheet_name="По исследованиям", index=False)
+    export_summary.to_excel(writer, sheet_name="Сводка", index=False)
+buffer.seek(0)
+
+st.download_button(
+    label="📥 Скачать Excel (исследования × отделения)",
+    data=buffer.getvalue(),
+    file_name="research_by_department.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 st.progress(min(status_pct / 100, 1.0))
 st.caption(f"Выполнено {status_done} из {status_ordered} позиций по столбцу «Статус».")

@@ -14,7 +14,6 @@ STATUS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
 def parse_status(s):
-    """Возвращает (заказано_по_статусу, выполнено). Если не распарсили — (None, None)."""
     if not isinstance(s, str):
         return None, None
     m = STATUS_RE.search(s)
@@ -81,12 +80,10 @@ def load_and_prepare(file_bytes: bytes):
     df = df[need].copy()
     df = df[df["Направление"].notna()].reset_index(drop=True)
 
-    # --- парсим статус отдельно (для таблицы в конце) ---
     parsed = df["Статус"].apply(parse_status)
     df["Статус_Заказано"] = [p[0] for p in parsed]
     df["Статус_Выполнено"] = [p[1] for p in parsed]
 
-    # --- разворачиваем исследования: 1 строка = 1 заказ исследования ---
     rows = []
     for _, r in df.iterrows():
         for res in split_research(r["Исследования"]):
@@ -120,43 +117,95 @@ if long_df.empty:
     st.warning("Не удалось извлечь ни одного исследования.")
     st.stop()
 
-# ---------- Раскрывающиеся таблицы по исследованиям ----------
+# ============================================================
+# 1. Сводка + топ-исследования графиком
+# ============================================================
 summary = (
     long_df.groupby("Исследование", dropna=False)
-    .size()  # ← просто количество заказов (строк)
+    .size()
     .reset_index(name="Заказано")
     .sort_values("Заказано", ascending=False)
+    .reset_index(drop=True)
 )
 
-st.subheader("Исследования (нажмите, чтобы раскрыть отделения)")
+total_orders = int(summary["Заказано"].sum())
+total_research = len(summary)
+total_depts = long_df["Отделение"].nunique()
 
-for _, row in summary.iterrows():
-    research = row["Исследование"]
-    total = int(row["Заказано"])
+c1, c2, c3 = st.columns(3)
+c1.metric("Всего заказов исследований", total_orders)
+c2.metric("Уникальных исследований", total_research)
+c3.metric("Отделений", total_depts)
 
-    with st.expander(f"{research} — заказано: {total}"):
-        dept_stats = (
-            long_df[long_df["Исследование"] == research]
-            .groupby("Отделение", dropna=False)
-            .size()
-            .reset_index(name="Заказано раз")
-            .sort_values("Заказано раз", ascending=False)
-        )
-        st.dataframe(dept_stats, use_container_width=True, hide_index=True)
+st.divider()
 
-# ---------- Статусы (в самом конце) ----------
+# --- Горизонтальный бар-чарт топ-N ---
+st.subheader("🔝 Топ исследований по числу заказов")
+
+top_n = st.slider("Сколько показать в графике", 5, min(50, len(summary)), min(15, len(summary)))
+chart_df = summary.head(top_n).set_index("Исследование")["Заказано"]
+st.bar_chart(chart_df, horizontal=True, use_container_width=True)
+
+st.divider()
+
+# ============================================================
+# 2. Раскрывающиеся таблицы с графиком по отделениям
+# ============================================================
+st.subheader("📂 Детализация по исследованиям")
+st.caption("Нажмите на исследование, чтобы увидеть распределение по отделениям.")
+
+search = st.text_input("🔍 Фильтр по названию исследования", "").strip().lower()
+filtered = summary[summary["Исследование"].str.lower().str.contains(search)] if search else summary
+
+if filtered.empty:
+    st.info("Ничего не найдено по фильтру.")
+else:
+    for _, row in filtered.iterrows():
+        research = row["Исследование"]
+        total = int(row["Заказано"])
+
+        with st.expander(f"{research} — {total} заказ(ов)"):
+            dept_stats = (
+                long_df[long_df["Исследование"] == research]
+                .groupby("Отделение", dropna=False)
+                .size()
+                .reset_index(name="Заказано раз")
+                .sort_values("Заказано раз", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            col_chart, col_table = st.columns([2, 3])
+
+            with col_chart:
+                st.caption("График по отделениям")
+                st.bar_chart(
+                    dept_stats.set_index("Отделение")["Заказано раз"],
+                    horizontal=True,
+                    use_container_width=True,
+                    height=max(200, 35 * len(dept_stats)),
+                )
+
+            with col_table:
+                st.caption("Таблица")
+                styled = dept_stats.style.background_gradient(
+                    subset=["Заказано раз"], cmap="Blues"
+                ).format({"Заказано раз": "{:d}"})
+                st.dataframe(styled, use_container_width=True, hide_index=True, height=max(200, 35 * len(dept_stats)))
+
+# ============================================================
+# 3. Статусы — визуально внизу
+# ============================================================
+st.divider()
 st.header("📋 Статусы по направлениям")
 
-status_summary = pd.DataFrame({
-    "Показатель": ["Заказано (из статуса)", "Выполнено (из статуса)"],
-    "Значение": [
-        int(raw_df["Статус_Заказано"].fillna(0).sum()),
-        int(raw_df["Статус_Выполнено"].fillna(0).sum()),
-    ],
-})
-status_summary["%"] = (
-    status_summary["Значение"] / status_summary["Значение"].iloc[0] * 100
-).round(1)
-status_summary.loc[0, "%"] = 100.0
+status_ordered = int(raw_df["Статус_Заказано"].fillna(0).sum())
+status_done = int(raw_df["Статус_Выполнено"].fillna(0).sum())
+status_pct = (status_done / status_ordered * 100) if status_ordered else 0
 
-st.dataframe(status_summary, use_container_width=True, hide_index=True)
+s1, s2, s3 = st.columns(3)
+s1.metric("Заказано (из статуса)", status_ordered)
+s2.metric("Выполнено (из статуса)", status_done)
+s3.metric("Выполнение", f"{status_pct:.1f}%")
+
+st.progress(min(status_pct / 100, 1.0))
+st.caption(f"Выполнено {status_done} из {status_ordered} позиций по столбцу «Статус».")
